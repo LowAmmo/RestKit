@@ -34,6 +34,20 @@ RKLogDebug(@"%s: Ignoring NSURLConnection delegate message sent after cancel.", 
 return __VA_ARGS__;                                                                \
 }
 
+
+@interface RKResponse()
+
+/**
+ * This function helps with better error messaging by translating the trust result into a string representation of
+ * the result.
+ * 
+ * @param eResult   The result to translate to a string
+ * @return The Trust result as a string
+ */
++(NSString*)secTrustResultToString:(SecTrustResultType)eResult;
+
+@end
+
 @implementation RKResponse
 
 @synthesize body = _body;
@@ -113,98 +127,146 @@ return __VA_ARGS__;                                                             
 - (BOOL)isServerTrusted:(SecTrustRef)trust
 {
     BOOL proceed = NO;
-
+    SecTrustResultType result = kSecTrustResultOtherError;
+    
     if (_request.disableCertificateValidation) {
-        proceed = YES;
-    } else if ([_request.additionalRootCertificates count] > 0) {
+        return TRUE;
+    } else if ([_request.additionalRootCertificates count] > 0 ) {
+        // Add specified root certificates to the trust store
         CFArrayRef rootCerts = (CFArrayRef)[_request.additionalRootCertificates allObjects];
-        SecTrustResultType result;
-        OSStatus returnCode;
-
+        
         if (rootCerts && CFArrayGetCount(rootCerts)) {
             // this could fail, but the trust evaluation will proceed (it's likely to fail, of course)
             SecTrustSetAnchorCertificates(trust, rootCerts);
         }
-
-        returnCode = SecTrustEvaluate(trust, &result);
-
-        if (returnCode == errSecSuccess) {
-            proceed = (result == kSecTrustResultProceed || result == kSecTrustResultConfirm || result == kSecTrustResultUnspecified);
-            if (result == kSecTrustResultRecoverableTrustFailure) {
+    }
+    // If not additional root certificates specified, will validate the server certificate using existing root certificates
+    
+    OSStatus returnCode = SecTrustEvaluate(trust, &result);
+    
+    if (returnCode == errSecSuccess) {
+        switch(result) {
+            case kSecTrustResultProceed:
+            case kSecTrustResultConfirm:
+            case kSecTrustResultUnspecified:
+                proceed = TRUE;
+                break;
+            case kSecTrustResultRecoverableTrustFailure: // Usually a self-signed certificate
                 // TODO: should try to recover here
                 // call SecTrustGetCssmResult() for more information about the failure
-            }
+                break;
+            case kSecTrustResultDeny:
+            case kSecTrustResultInvalid:
+            case kSecTrustResultFatalTrustFailure:
+            case kSecTrustResultOtherError:
+            default:
+                RKLogWarning(@"Trust Error encountered with server certificate. Trust Error: %@",[RKResponse secTrustResultToString:result]);
+                break;
         }
     }
-
+    
     return proceed;
 }
 
-// Handle basic auth & SSL certificate validation
-- (void)connection:(NSURLConnection *)connection didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
+//Handle Authentication for:
+// + HTTP Basic Auth
+// + Server Certificate Trust
+// + Client Certificate Trust
+// + Other authentication that can be read from the NSURLCredentialStorage
+-(void)connection:(NSURLConnection*)connection willSendRequestForAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
 {
+    NSURLProtectionSpace* space = challenge.protectionSpace;
+    NSString* authMethod = space.authenticationMethod;
     RKResponseIgnoreDelegateIfCancelled();
-    RKLogDebug(@"Received authentication challenge");
-
-    if ([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
-        SecTrustRef trust = [[challenge protectionSpace] serverTrust];
-        if ([self isServerTrusted:trust]) {
-            [challenge.sender useCredential:[NSURLCredential credentialForTrust:trust] forAuthenticationChallenge:challenge];
-        } else {
-            [[challenge sender] cancelAuthenticationChallenge:challenge];
-        }
+    RKLogDebug(@"Received authentication challenge: with authenticationMethod = %@", authMethod);
+    
+    //Server SSL Certificate trust
+    if ([authMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        SecTrustRef trust = space.serverTrust;
+		if ([self isServerTrusted:trust]) {
+			[challenge.sender useCredential:[NSURLCredential credentialForTrust:trust] forAuthenticationChallenge:challenge];
+		}
+        else {
+            RKLogWarning(@"Failed authentication challenge - unable to trust Server");
+			[[challenge sender] cancelAuthenticationChallenge:challenge];
+		}
         return;
-    }
+	}
 
-    if ([challenge previousFailureCount] == 0) {
-        NSURLCredential *newCredential;
-        newCredential = [NSURLCredential credentialWithUser:[NSString stringWithFormat:@"%@", _request.username]
-                                                   password:[NSString stringWithFormat:@"%@", _request.password]
-                                                persistence:NSURLCredentialPersistenceNone];
-        [[challenge sender] useCredential:newCredential
-               forAuthenticationChallenge:challenge];
-    } else {
-        RKLogWarning(@"Failed authentication challenge after %ld failures", (long)[challenge previousFailureCount]);
-        [[challenge sender] cancelAuthenticationChallenge:challenge];
-    }
-}
-
-- (BOOL)connection:(NSURLConnection *)connection canAuthenticateAgainstProtectionSpace:(NSURLProtectionSpace *)space
-{
-    RKResponseIgnoreDelegateIfCancelled(NO);
-    RKLogDebug(@"Asked if canAuthenticateAgainstProtectionSpace: with authenticationMethod = %@", [space authenticationMethod]);
-    if ([[space authenticationMethod] isEqualToString:NSURLAuthenticationMethodServerTrust]) {
-        // server is using an SSL certificate that the OS can't validate
-        // see whether the client settings allow validation here
-        if (_request.disableCertificateValidation || [_request.additionalRootCertificates count] > 0) {
-            return YES;
-        } else {
-            return NO;
+    //Handle basic auth - if the credentials are provided
+    if ([authMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]
+       && 0 == challenge.previousFailureCount
+       && [self hasCredentials]) {
+		NSURLCredential *newCredential;
+		newCredential=[NSURLCredential credentialWithUser:[NSString stringWithFormat:@"%@", _request.username]
+		                                         password:[NSString stringWithFormat:@"%@", _request.password]
+                                              persistence:NSURLCredentialPersistenceNone];
+		[[challenge sender] useCredential:newCredential forAuthenticationChallenge:challenge];
+        
+        return;
+	}
+    
+    //Handle other common authentication methods just using the NSURLCredentialStorage
+    if([authMethod isEqualToString:NSURLAuthenticationMethodClientCertificate]
+       || [authMethod isEqualToString:NSURLAuthenticationMethodDefault]
+       || [authMethod isEqualToString:NSURLAuthenticationMethodHTMLForm]
+       || [authMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]) {
+        NSURLCredential* defaultCredential = [[NSURLCredentialStorage sharedCredentialStorage] defaultCredentialForProtectionSpace:space];
+        if (0 == challenge.previousFailureCount && defaultCredential) {
+            //If no failures, try the "default" credential for the space
+            [challenge.sender useCredential:defaultCredential forAuthenticationChallenge:challenge];
+            return;
+        }
+        
+        //If there has been a failure, and/or there is no default credential, try all of the provided credentials
+        NSDictionary* credentials = [[NSURLCredentialStorage sharedCredentialStorage] credentialsForProtectionSpace:space];
+        if (!credentials || credentials.count<=0) {
+            RKLogWarning(@"Received an authentication challenge without any credentials to satisfy the request.");
+            [[challenge sender] cancelAuthenticationChallenge:challenge];
+            return;
+        }
+        
+        int credentialCount = (nil==defaultCredential ? 0 : -1); // If there is a default credential - try all of the 
+        for(NSURLCredential* credential in credentials.allValues) {
+            //Skips the last tried credential(s) & the default credential
+            if(credential == defaultCredential || (credentialCount++ < challenge.previousFailureCount)) {
+                continue;
+            }
+            
+            if ([authMethod isEqualToString:NSURLAuthenticationMethodClientCertificate]) {
+                if( credential.certificates && credential.certificates.count > 0) {
+                    // Only credentials with certificates count
+                    //NOTE: Only credentials will certificates should be getting returned anyway - this is just an extra check
+                    [challenge.sender useCredential:credential forAuthenticationChallenge:challenge];
+                    return;
+                }
+            } else {
+                // Could be:
+                //      NSURLAuthenticationMethodDefault
+                //      NSURLAuthenticationMethodHTMLForm
+                //      NSURLAuthenticationMethodHTTPBasic
+                [challenge.sender useCredential:credential forAuthenticationChallenge:challenge];
+                return;
+            }
         }
     }
-
-    // Handle non-SSL challenges
-    BOOL hasCredentials = [self hasCredentials];
-    if (! hasCredentials) {
-        RKLogWarning(@"Received an authentication challenge without any credentials to satisfy the request.");
-    }
-
-    return hasCredentials;
+    
+    RKLogWarning(@"Failed authentication challenge after %ld failures", (long) [challenge previousFailureCount]);
+    [[challenge sender] cancelAuthenticationChallenge:challenge];
 }
 
 - (NSURLRequest *)connection:(NSURLConnection *)connection willSendRequest:(NSURLRequest *)request redirectResponse:(NSURLResponse *)response
 {
-  if (nil == response || _request.followRedirect) {
-    RKLogDebug(@"Proceeding with request to %@", request);
-    return request;
-  } else {
-    RKLogDebug(@"Not following redirect to %@", request);
-    return nil;
-  }
+    if (nil == response || _request.followRedirect) {
+        RKLogDebug(@"Proceeding with request to %@", request);
+        return request;
+    } else {
+        RKLogDebug(@"Not following redirect to %@", request);
+        return nil;
+    }
 }
 
-- (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data
-{
+- (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {
     RKResponseIgnoreDelegateIfCancelled();
     [_body appendData:data];
     [_request invalidateTimeoutTimer];
@@ -518,5 +580,36 @@ return __VA_ARGS__;                                                             
             [contentType rangeOfString:@"application/json"
                                options:NSCaseInsensitiveSearch|NSAnchoredSearch].length > 0);
 }
+
+
+#pragma mark - Static Helper Functions
+
++(NSString*)secTrustResultToString:(SecTrustResultType)eResult
+{
+    switch(eResult)
+    {
+        case kSecTrustResultProceed:
+            return @"kSecTrustResultProceed";
+        case kSecTrustResultConfirm:
+            return @"kSecTrustResultConfirm";
+        case kSecTrustResultUnspecified:
+            return @"kSecTrustResultUnspecified";
+        case kSecTrustResultRecoverableTrustFailure:
+            return @"kSecTrustResultRecoverableTrustFailure";
+        case kSecTrustResultDeny:
+            return @"kSecTrustResultDeny";
+        case kSecTrustResultInvalid:
+            return @"kSecTrustResultInvalid";
+        case kSecTrustResultFatalTrustFailure:
+            return @"kSecTrustResultFatalTrustFailure";
+        case kSecTrustResultOtherError:
+            return @"kSecTrustResultOtherError";
+        default:
+            break;
+    }
+    
+    return @"kSecTrustResult-(Unknown)";
+}
+
 
 @end

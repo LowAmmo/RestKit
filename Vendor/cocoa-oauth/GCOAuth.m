@@ -210,7 +210,7 @@ static BOOL GCOAuthUseHTTPSCookieStorage = YES;
     time_t t;
     time(&t);
     mktime(gmtime(&t));
-    return [NSString stringWithFormat:@"%lu", (t + GCOAuthTimeStampOffset)];
+    return [NSString stringWithFormat:@"%ld", (t + GCOAuthTimeStampOffset)];
 }
 + (NSString *)queryStringFromParameters:(NSDictionary *)parameters {
     NSMutableArray *entries = [NSMutableArray array];
