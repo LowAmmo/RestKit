@@ -178,7 +178,6 @@ return __VA_ARGS__;                                                             
     NSURLProtectionSpace* space = challenge.protectionSpace;
     NSString* authMethod = space.authenticationMethod;
     RKResponseIgnoreDelegateIfCancelled();
-    RKLogDebug(@"Received authentication challenge: with authenticationMethod = %@", authMethod);
     
     //Server SSL Certificate trust
     if ([authMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
@@ -194,9 +193,10 @@ return __VA_ARGS__;                                                             
 	}
 
     //Handle basic auth - if the credentials are provided
-    if ([authMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]
-       && 0 == challenge.previousFailureCount
-       && [self hasCredentials]) {
+    if (0 == challenge.previousFailureCount
+        && [self hasCredentials]
+        && ([authMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]
+            || [authMethod isEqualToString:NSURLAuthenticationMethodHTTPDigest])) {
 		NSURLCredential *newCredential;
 		newCredential=[NSURLCredential credentialWithUser:[NSString stringWithFormat:@"%@", _request.username]
 		                                         password:[NSString stringWithFormat:@"%@", _request.password]
@@ -210,7 +210,8 @@ return __VA_ARGS__;                                                             
     if([authMethod isEqualToString:NSURLAuthenticationMethodClientCertificate]
        || [authMethod isEqualToString:NSURLAuthenticationMethodDefault]
        || [authMethod isEqualToString:NSURLAuthenticationMethodHTMLForm]
-       || [authMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]) {
+       || [authMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]
+       || [authMethod isEqualToString:NSURLAuthenticationMethodHTTPDigest]) {
         NSURLCredential* defaultCredential = [[NSURLCredentialStorage sharedCredentialStorage] defaultCredentialForProtectionSpace:space];
         if (0 == challenge.previousFailureCount && defaultCredential) {
             //If no failures, try the "default" credential for the space
@@ -226,7 +227,7 @@ return __VA_ARGS__;                                                             
             return;
         }
         
-        int credentialCount = (nil==defaultCredential ? 0 : -1); // If there is a default credential - try all of the 
+        int credentialCount = (nil==defaultCredential ? 0 : -1); // If there is a default credential - try all of the possible credentials
         for(NSURLCredential* credential in credentials.allValues) {
             //Skips the last tried credential(s) & the default credential
             if(credential == defaultCredential || (credentialCount++ < challenge.previousFailureCount)) {
@@ -245,6 +246,7 @@ return __VA_ARGS__;                                                             
                 //      NSURLAuthenticationMethodDefault
                 //      NSURLAuthenticationMethodHTMLForm
                 //      NSURLAuthenticationMethodHTTPBasic
+                //      NSURLAuthenticationMethodHTTPDigest
                 [challenge.sender useCredential:credential forAuthenticationChallenge:challenge];
                 return;
             }
@@ -253,17 +255,6 @@ return __VA_ARGS__;                                                             
     
     RKLogWarning(@"Failed authentication challenge after %ld failures", (long) [challenge previousFailureCount]);
     [[challenge sender] cancelAuthenticationChallenge:challenge];
-}
-
-- (NSURLRequest *)connection:(NSURLConnection *)connection willSendRequest:(NSURLRequest *)request redirectResponse:(NSURLResponse *)response
-{
-    if (nil == response || _request.followRedirect) {
-        RKLogDebug(@"Proceeding with request to %@", request);
-        return request;
-    } else {
-        RKLogDebug(@"Not following redirect to %@", request);
-        return nil;
-    }
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {

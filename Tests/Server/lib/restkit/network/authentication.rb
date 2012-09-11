@@ -32,6 +32,24 @@ module RestKit
         auth.passwords_hashed = true
         auth.call(request.env)
       end
+
+      post '/authentication/form' do
+        if(request.params.count<=0)
+            response['WWW-Authenticate'] = %(Form realm="#{AUTH_REALM}")
+            throw(:halt, [401, "Access Denied.\n"])
+        end
+        puts "Form Auth params: #{request.params}"
+        puts "Username: #{request.params['username']}"
+        puts "Credentials: #{@auth.credentials}" if @auth.provided?
+        unless @auth.provided? && @auth.form? && @auth.credentials && @auth.credentials == [AUTH_USERNAME, AUTH_PASSWORD]
+            response['WWW-Authenticate'] = %(Basic realm="#{AUTH_REALM}")
+            throw(:halt, [401, "Access Denied.\n"])
+        end
+      end
+      
+      get '/authentication/fail' do
+        throw(:halt, [401, "Access Denied.\n"])
+      end
     end
   end
 end

@@ -23,10 +23,14 @@
 
 static NSString * const RKAuthenticationTestUsername = @"restkit";
 static NSString * const RKAuthenticationTestPassword = @"authentication";
+static NSString * const RKAuthenticationTestRealm = @"RestKit";
 
 @interface RKAuthenticationTest : RKTestCase {
 
 }
+
++(void)clearCredentialStorageForClient:(RKClient*)client;
++(void)clearCredentialStorageForSpace:(NSURLProtectionSpace*)protectionSpace;
 
 @end
 
@@ -76,6 +80,106 @@ static NSString * const RKAuthenticationTestPassword = @"authentication";
     [client get:@"/authentication/digest" delegate:loader];
     [loader waitForResponse];
     assertThatBool([loader.response isOK], is(equalToBool(YES)));
+}
+
+- (void)testUseCredentialStoreToAuthenticateViaHTTPAuthBasic
+{
+    RKTestResponseLoader *loader = [RKTestResponseLoader responseLoader];
+    RKClient *client = [RKTestFactory client];
+    client.authenticationType = RKRequestAuthenticationTypeHTTPBasic;
+    client.username = nil;
+    client.password = nil;
+
+    NSURLCredential* credential = [NSURLCredential credentialWithUser:RKAuthenticationTestUsername
+                                                             password:RKAuthenticationTestPassword
+                                                          persistence:NSURLCredentialPersistenceForSession];
+    NSURLProtectionSpace* protectionSpace = [[NSURLProtectionSpace alloc] initWithHost:client.baseURL.host
+                                                                                  port:client.baseURL.port.intValue
+                                                                              protocol:client.baseURL.scheme
+                                                                                 realm:RKAuthenticationTestRealm
+                                                                  authenticationMethod:NSURLAuthenticationMethodDefault];
+    [RKAuthenticationTest clearCredentialStorageForSpace:protectionSpace];
+    
+    [[NSURLCredentialStorage sharedCredentialStorage] setCredential:credential forProtectionSpace:protectionSpace];
+    
+    [client get:@"/authentication/basic" delegate:loader];
+    [loader waitForResponse];
+    assertThatBool([loader.response isOK], is(equalToBool(YES)));
+    
+    [RKAuthenticationTest clearCredentialStorageForSpace:protectionSpace];
+    
+    //Resets the authentication for the connection
+    [client get:@"/authentication/fail" delegate:loader];
+    [loader waitForResponse];
+    assertThatBool([loader.response isOK], is(equalToBool(NO)));
+}
+
+- (void)testUseCredentialStoreToAuthenticateViaHTTPFormAuth
+{
+    RKTestResponseLoader *loader = [RKTestResponseLoader responseLoader];
+    RKClient *client = [RKTestFactory client];
+    client.authenticationType = RKRequestAuthenticationTypeNone;
+    client.username = nil;
+    client.password = nil;
+    
+    NSURLCredential* credential = [NSURLCredential credentialWithUser:RKAuthenticationTestUsername
+                                                             password:RKAuthenticationTestPassword
+                                                          persistence:NSURLCredentialPersistenceForSession];
+    NSURLProtectionSpace* protectionSpace = [[NSURLProtectionSpace alloc] initWithHost:client.baseURL.host
+                                                                                  port:client.baseURL.port.intValue
+                                                                              protocol:client.baseURL.scheme
+                                                                                 realm:RKAuthenticationTestRealm
+                                                                  authenticationMethod:NSURLAuthenticationMethodHTMLForm];
+    [RKAuthenticationTest clearCredentialStorageForSpace:protectionSpace];
+    
+    [[NSURLCredentialStorage sharedCredentialStorage] setCredential:credential forProtectionSpace:protectionSpace];
+    
+    [client post:@"/authentication/form" params:nil delegate:loader];
+    [loader waitForResponse];
+    assertThatBool([loader.response isOK], is(equalToBool(YES)));
+    
+    [RKAuthenticationTest clearCredentialStorageForSpace:protectionSpace];
+    
+    //Resets the authentication for the connection
+    [client get:@"/authentication/fail" delegate:loader];
+    [loader waitForResponse];
+    assertThatBool([loader.response isOK], is(equalToBool(NO)));
+}
+
+
+#pragma mark - Static Helpers
+
++(void)clearCredentialStorageForClient:(RKClient*)client
+{
+    NSString* authMethod = nil;
+    switch (client.authenticationType)
+    {
+        case RKRequestAuthenticationTypeHTTPBasic:
+            authMethod = NSURLAuthenticationMethodHTTPBasic;
+            break;
+        case RKRequestAuthenticationTypeHTTP:
+        case RKRequestAuthenticationTypeNone:
+        default:
+            authMethod = NSURLAuthenticationMethodDefault;
+            break;
+    }
+    
+    NSURLProtectionSpace* protectionSpace = [[NSURLProtectionSpace alloc] initWithHost:client.baseURL.host
+                                                                                  port:client.baseURL.port.intValue
+                                                                              protocol:client.baseURL.scheme
+                                                                                 realm:RKAuthenticationTestRealm
+                                                                  authenticationMethod:authMethod];
+    
+    [RKAuthenticationTest clearCredentialStorageForSpace:protectionSpace];
+}
+
++(void)clearCredentialStorageForSpace:(NSURLProtectionSpace*)protectionSpace
+{
+    NSDictionary* credentials = [[NSURLCredentialStorage sharedCredentialStorage] credentialsForProtectionSpace:protectionSpace];
+    for(NSURLCredential* credential in credentials.allValues)
+    {
+        [[NSURLCredentialStorage sharedCredentialStorage] removeCredential:credential forProtectionSpace:protectionSpace];
+    }
 }
 
 @end
